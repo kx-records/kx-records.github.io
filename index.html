@@ -284,6 +284,16 @@
       .footer-links a, .copyright { color: #837d89; font: 10px var(--mono); text-decoration: none; }
       .footer-links a:hover { color: white; }
       .copyright { margin: 0; text-align: right; }
+      .watermark {
+        margin: 0;
+        padding: 17px 24px 21px;
+        border-top: 1px solid rgba(255,255,255,.04);
+        color: #aaa2b4;
+        font: 11px var(--mono);
+        letter-spacing: .09em;
+        text-align: center;
+      }
+      .watermark span { padding-inline: 9px; color: var(--purple-bright); }
 
       @media (max-width: 700px) {
         .wrap { width: min(100% - 36px, 540px); }
@@ -438,8 +448,9 @@
           <a href="#submit">Submit</a>
           <a href="#top">Back to top ↑</a>
         </nav>
-        <p class="copyright">© <span id="year"></span> KX Records</p>
+        <p class="copyright">© 2026 KX Records</p>
       </div>
+      <p class="watermark">Made by Cyntron Records team <span aria-hidden="true">·</span> © 2026</p>
     </footer>
 
     <script>
@@ -538,13 +549,54 @@
           submitButton.textContent = "Transmitting…";
           showStatus("Sending your demo…", "");
           try {
-            const response = await fetch("/api/submit-demo", {
+            const configuredWebhook = window.KX_DISCORD_WEBHOOK_URL;
+            let webhookUrl;
+            try {
+              webhookUrl = new URL(configuredWebhook);
+              if (
+                webhookUrl.protocol !== "https:" ||
+                !["discord.com", "discordapp.com"].includes(webhookUrl.hostname) ||
+                !webhookUrl.pathname.startsWith("/api/webhooks/")
+              ) {
+                throw new Error();
+              }
+              webhookUrl.searchParams.set("wait", "true");
+            } catch {
+              throw new Error("Demo submissions aren't configured yet. Add a Discord webhook URL to config.js.");
+            }
+
+            const payload = {
+              allowed_mentions: { parse: [] },
+              embeds: [{
+                title: "New demo submission",
+                color: 10512639,
+                fields: [
+                  { name: "Artist", value: form.elements.artistName.value.trim(), inline: true },
+                  { name: "Track", value: form.elements.trackTitle.value.trim(), inline: true },
+                  { name: "Genre", value: form.elements.genre.value.trim(), inline: true },
+                  { name: "Email", value: form.elements.email.value.trim(), inline: true },
+                  { name: "Demo", value: link || `Attached: ${file.name.slice(0, 240)}`, inline: false },
+                  ...(form.elements.message.value.trim()
+                    ? [{ name: "Message", value: form.elements.message.value.trim(), inline: false }]
+                    : [])
+                ],
+                timestamp: new Date().toISOString()
+              }]
+            };
+            const webhookForm = new FormData();
+            webhookForm.set("payload_json", JSON.stringify(payload));
+            if (file) {
+              const safeName = file.name.replace(/[^\w.\- ()]/g, "_").slice(0, 120) || "demo";
+              webhookForm.set("files[0]", file, safeName);
+            }
+
+            const response = await fetch(webhookUrl, {
               method: "POST",
-              body: new FormData(form)
+              body: webhookForm
             });
             const result = await response.json().catch(() => null);
             if (!response.ok) {
-              throw new Error(result?.error || "Your demo could not be sent. Please try again later.");
+              throw new Error(result?.message || "Your demo could not be sent. Please try again later.");
             }
             form.reset();
             updateFile(null);
@@ -558,5 +610,6 @@
         });
       })();
     </script>
+    <script src="config.js"></script>
   </body>
 </html>

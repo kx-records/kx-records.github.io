@@ -1,0 +1,1 @@
+window.KX_DISCORD_WEBHOOK_URL = "";
