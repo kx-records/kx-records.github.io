@@ -465,8 +465,6 @@
         const maxFileSize = 25 * 1024 * 1024;
         const allowedExtensions = /\.(mp3|wav|m4a)$/i;
 
-        document.querySelector("#year").textContent = new Date().getFullYear();
-
         function showStatus(message, state) {
           status.textContent = message;
           status.dataset.state = state;
