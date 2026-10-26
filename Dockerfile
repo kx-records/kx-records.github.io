@@ -6,7 +6,7 @@ COPY package*.json ./
 RUN npm install --omit=dev
 
 COPY server.js ./
-COPY index.html portal.css portal.js config.js ./
+COPY index.html dashboard.html portal.css dashboard.css portal.js dashboard.js config.js ./
 
 RUN mkdir -p /app/data/uploads
 

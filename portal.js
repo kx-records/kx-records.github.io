@@ -34,18 +34,7 @@
   async function refresh() {
     const { user } = await api("/api/me");
     state.user = user;
-    if (!user) {
-      $("#account-button").textContent = "Account";
-      portal.classList.remove("is-open");
-      return;
-    }
-    $("#account-button").textContent = "Dashboard";
-    $("#portal-name").textContent = user.name;
-    $("#portal-role").textContent = roleName(user.role);
-    $("#submit-panel").hidden = !["artist", ...staffRoles].includes(user.role);
-    $("#staff-panel").hidden = !staffRoles.includes(user.role);
-    if (staffRoles.includes(user.role)) await loadUsers();
-    await loadDemos();
+    $("#account-button").textContent = user ? "Dashboard" : "Account";
   }
 
   async function loadDemos() {
@@ -102,49 +91,18 @@
     status.textContent = "";
     try {
       await api(form.dataset.endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
-      form.reset(); closeAuth(); await refresh(); portal.classList.add("is-open");
-      if (form.id === "demo-auth-form") $("#demo-form").scrollIntoView({ behavior: "smooth" });
+      window.location.assign("/dashboard.html");
     } catch (error) { status.textContent = error.message; }
   }
 
-  $("#account-button").addEventListener("click", () => state.user ? portal.classList.toggle("is-open") : openAuth());
+  $("#account-button").addEventListener("click", () => state.user ? window.location.assign("/dashboard.html") : openAuth());
   $("#close-auth").addEventListener("click", closeAuth);
-  $("#close-portal").addEventListener("click", () => portal.classList.remove("is-open"));
   $("#login-form").addEventListener("submit", submitAuth);
   $("#register-form").addEventListener("submit", submitAuth);
   document.querySelectorAll(".auth-tab").forEach((button) => button.addEventListener("click", () => switchAuth(button.dataset.tab)));
   authBackdrop.addEventListener("click", (event) => { if (event.target === authBackdrop) closeAuth(); });
-  document.addEventListener("keydown", (event) => { if (event.key === "Escape") { closeAuth(); portal.classList.remove("is-open"); } });
-
-  $("#logout-button").addEventListener("click", async () => {
-    await api("/api/logout", { method: "POST" });
-    await refresh();
-  });
-  window.addEventListener("kx:demos-updated", () => {
-    if (state.user) loadDemos().catch(() => {});
-  });
-  $("#demo-filter").addEventListener("click", (event) => {
-    if (!event.target.dataset.filter) return;
-    state.filter = event.target.dataset.filter;
-    document.querySelectorAll("#demo-filter button").forEach((button) => button.classList.toggle("button-outline", button !== event.target));
-    renderDemos();
-  });
-  $("#demo-list").addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-review]");
-    if (!button) return;
-    try {
-      await api(`/api/demos/${button.dataset.id}/review`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ status: button.dataset.review }) });
-      await loadDemos();
-    } catch (error) { alert(error.message); }
-  });
-  $("#staff-list").addEventListener("change", async (event) => {
-    const select = event.target.closest("[data-role-user]");
-    if (!select) return;
-    try {
-      await api(`/api/users/${select.dataset.roleUser}/role`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: select.value }) });
-      await loadUsers();
-    } catch (error) { alert(error.message); select.value = state.users.find((user) => user.id === select.dataset.roleUser)?.role || "artist"; }
-  });
+  document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeAuth(); });
+  if (window.location.hash === "#account") openAuth();
 
   refresh().catch(() => {});
 })();

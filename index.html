@@ -480,27 +480,6 @@
       </div>
     </div>
 
-    <aside class="portal-drawer" id="portal-drawer" aria-label="Account dashboard">
-      <div class="portal-top">
-        <div class="portal-identity"><strong class="portal-name" id="portal-name"></strong><span class="role-badge" id="portal-role"></span></div>
-        <div class="portal-actions"><button class="button button-outline button-small" id="logout-button" type="button">Sign out</button><button class="icon-button" id="close-portal" type="button" aria-label="Close dashboard">×</button></div>
-      </div>
-      <section class="portal-section" id="submit-panel">
-        <h3>Submit demo</h3>
-        <p class="demo-meta">Use the transmission portal below. Your account is attached automatically.</p>
-        <button class="button" type="button" onclick="document.querySelector('#submit').scrollIntoView({behavior:'smooth'});document.querySelector('#portal-drawer').classList.remove('is-open');">Open submission form</button>
-      </section>
-      <section class="portal-section">
-        <h3>Submissions</h3>
-        <div class="filter-row" id="demo-filter"><button class="button" type="button" data-filter="all">All</button><button class="button button-outline" type="button" data-filter="pending">Pending</button><button class="button button-outline" type="button" data-filter="approved">Approved</button><button class="button button-outline" type="button" data-filter="rejected">Rejected</button></div>
-        <div class="demo-list" id="demo-list"></div>
-      </section>
-      <section class="portal-section" id="staff-panel" hidden>
-        <h3>Team</h3>
-        <div class="staff-list" id="staff-list"></div>
-      </section>
-    </aside>
-
     <script src="portal.js"></script>
     <script>
       (() => {

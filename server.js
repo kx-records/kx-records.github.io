@@ -6,6 +6,7 @@ const session = require("express-session");
 const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const multer = require("multer");
+const cookieSignature = require("cookie-signature");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -13,6 +14,7 @@ const root = __dirname;
 const dataDir = path.join(root, "data");
 const dbFile = path.join(dataDir, "portal.json");
 const uploadDir = path.join(dataDir, "uploads");
+const sessionFile = path.join(dataDir, "sessions.json");
 fs.mkdirSync(uploadDir, { recursive: true });
 
 const cleanRole = (role) => ["artist", "ar", "manager", "owner", "developer"].includes(role) ? role : "artist";
@@ -31,6 +33,60 @@ function loadDb() {
 
 function saveDb() {
   fs.writeFileSync(dbFile, JSON.stringify(db, null, 2));
+}
+
+class FileSessionStore extends session.Store {
+  constructor(file) {
+    super();
+    this.file = file;
+    this.sessions = this.read();
+  }
+
+  read() {
+    if (!fs.existsSync(this.file)) return {};
+    try {
+      const sessions = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      const now = Date.now();
+      return Object.fromEntries(Object.entries(sessions).filter(([, value]) => !value.expires || value.expires > now));
+    } catch {
+      return {};
+    }
+  }
+
+  write() {
+    const temporaryFile = `${this.file}.${process.pid}.tmp`;
+    fs.writeFileSync(temporaryFile, JSON.stringify(this.sessions));
+    fs.renameSync(temporaryFile, this.file);
+  }
+
+  get(sid, callback) {
+    const session = this.sessions[sid];
+    if (!session || (session.expires && session.expires <= Date.now())) {
+      delete this.sessions[sid];
+      callback(null, null);
+      return;
+    }
+    callback(null, JSON.parse(JSON.stringify(session.data)));
+  }
+
+  set(sid, session, callback) {
+    const expires = session.cookie.expires ? new Date(session.cookie.expires).getTime() : Date.now() + 30 * 24 * 60 * 60 * 1000;
+    this.sessions[sid] = { data: session, expires };
+    try { this.write(); callback(null); } catch (error) { callback(error); }
+  }
+
+  destroy(sid, callback) {
+    delete this.sessions[sid];
+    try { this.write(); callback(null); } catch (error) { callback(error); }
+  }
+
+  touch(sid, session, callback) {
+    if (this.sessions[sid]) {
+      this.sessions[sid].expires = session.cookie.expires ? new Date(session.cookie.expires).getTime() : Date.now() + 30 * 24 * 60 * 60 * 1000;
+      try { this.write(); } catch (error) { return callback(error); }
+    }
+    callback(null);
+  }
 }
 
 async function ensurePrivilegedAccount(emailValue, passwordValue, role, name) {
@@ -72,13 +128,17 @@ app.use(express.json({ limit: "100kb" }));
 app.use((request, response, next) => {
   const allowedOrigin = process.env.KX_FRONTEND_ORIGIN;
   const origin = request.get("origin");
-  if (!allowedOrigin) {
-    if (origin && origin !== `${request.protocol}://${request.get("host")}`) {
-      return response.status(403).json({ error: "Cross-origin request rejected." });
-    }
-    return next();
+  const sameOrigin = origin && (() => {
+    try { return new URL(origin).origin === `${request.protocol}://${request.get("host")}`; }
+    catch { return false; }
+  })();
+  if (!allowedOrigin && (!origin || sameOrigin)) return next();
+  if (allowedOrigin && origin && sameOrigin) return next();
+  if (allowedOrigin && origin && new URL(origin).origin !== new URL(allowedOrigin).origin) {
+    return response.status(403).json({ error: "Cross-origin request rejected." });
   }
-  if (origin !== allowedOrigin) return response.status(403).json({ error: "Cross-origin request rejected." });
+  if (!origin) return next();
+  if (allowedOrigin !== origin) return response.status(403).json({ error: "Cross-origin request rejected." });
   response.set("Access-Control-Allow-Origin", allowedOrigin);
   response.set("Access-Control-Allow-Credentials", "true");
   response.set("Vary", "Origin");
@@ -89,16 +149,30 @@ app.use((request, response, next) => {
   }
   next();
 });
+const frontendOrigin = process.env.KX_FRONTEND_ORIGIN || "";
+const sessionCookieOptions = {
+  httpOnly: true,
+  sameSite: frontendOrigin ? "none" : "lax",
+  secure: "auto",
+  path: "/"
+};
 app.use(session({
   secret: process.env.KX_SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
+  store: new FileSessionStore(sessionFile),
   resave: false,
   saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: process.env.KX_FRONTEND_ORIGIN ? "none" : "strict",
-    secure: process.env.NODE_ENV === "production"
-  }
+  rolling: true,
+  cookie: sessionCookieOptions
 }));
+
+function sendSessionResponse(request, response, user, status = 200) {
+  request.session.save((error) => {
+    if (error) return response.status(500).json({ error: "Session could not be created." });
+    const signedSessionId = `s:${cookieSignature.sign(request.sessionID, process.env.KX_SESSION_SECRET)}`;
+    response.cookie("connect.sid", signedSessionId, sessionCookieOptions);
+    response.status(status).json({ user: publicUser(user) });
+  });
+}
 
 function requireAuth(request, response, next) {
   if (!request.session.userId) return response.status(401).json({ error: "Sign in to continue." });
@@ -107,6 +181,13 @@ function requireAuth(request, response, next) {
     request.session.destroy(() => {});
     return response.status(401).json({ error: "Session is no longer valid." });
   }
+  request.user = user;
+  next();
+}
+
+function requirePageAuth(request, response, next) {
+  const user = db.users.find((item) => item.id === request.session.userId);
+  if (!user) return response.redirect(302, "/#account");
   request.user = user;
   next();
 }
@@ -251,6 +332,12 @@ app.patch("/api/users/:id/role", requireAuth, requireStaff, (request, response) 
   response.json({ user: publicUser(target) });
 });
 
+app.get("/dashboard.html", requirePageAuth, (_request, response) => {
+  response.sendFile(path.join(root, "dashboard.html"));
+});
+app.get("/dashboard", requirePageAuth, (_request, response) => {
+  response.redirect(302, "/dashboard.html");
+});
 app.use(express.static(root, { index: "index.html" }));
 app.use((error, _request, response, _next) => {
   if (error instanceof multer.MulterError) return response.status(400).json({ error: "Demo must be 25 MB or smaller." });

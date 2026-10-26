@@ -5,6 +5,7 @@ A server-backed label portal with accounts, sessions, role-based demo reviews, t
 This tutorial hosts two parts separately:
 
 - **GitHub Pages:** the public website and browser interface.
+- **Dedicated dashboard:** authenticated users are redirected to `/dashboard.html`, keeping account controls separate from the public site.
 - **Northflank Sandbox:** the private Node.js API, account database, sessions, and uploaded demos.
 
 Northflank’s Sandbox plan advertises no card and up to $20/month of usage. It includes persistent volumes, always-on services, automatic HTTPS, and the resources needed for this project. Free resources can change, and usage beyond the included allowance may require an account upgrade. Check Northflank’s current plan limits before production use.
@@ -217,9 +218,9 @@ The Northflank persistent volume must remain attached to the service. Deleting o
 
 ## Session behavior
 
-The server uses an HTTP-only cookie, but the current session store keeps sessions in memory. Sessions remain valid while the server process stays running and are destroyed after a restart or redeploy. The owner, artist, and team accounts remain in `data/portal.json`, but users must sign in again after a restart.
+The server uses an HTTP-only signed cookie and a file-backed session store in `data/sessions.json`. Sessions survive Node restarts and remain active until logout or the browser session ends, subject to the configured session expiry. The owner, artist, and team accounts remain in `data/portal.json`. Back up `data/sessions.json` only together with your account and upload data when required.
 
-For a high-availability or frequently redeployed service, replace `express-session`'s memory store with persistent storage such as Redis or a database-backed session store.
+The file-backed store is suitable for this single-instance deployment. For a load-balanced or frequently redeployed service, replace it with shared storage such as Redis or a database-backed session store.
 
 ## Local commands
 

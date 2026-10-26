@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#09090b">
+    <title>KX Records — Dashboard</title>
+    <link rel="stylesheet" href="portal.css">
+    <link rel="stylesheet" href="dashboard.css">
+  </head>
+  <body>
+    <header class="dashboard-header">
+      <nav class="dashboard-nav wrap" aria-label="Dashboard navigation">
+        <a class="brand" href="/" aria-label="KX Records home">
+          <span class="brand-mark" aria-hidden="true">KX</span>
+          <span class="brand-name">KX RECORDS</span>
+        </a>
+        <div class="dashboard-actions">
+          <span class="dashboard-session" id="session-status">Loading account…</span>
+          <button class="button button-outline button-small" id="logout-button" type="button">Sign out</button>
+        </div>
+      </nav>
+    </header>
+
+    <main class="dashboard-main wrap">
+      <section class="dashboard-heading" aria-labelledby="dashboard-title">
+        <p class="eyebrow">Account workspace</p>
+        <h1 id="dashboard-title">Dashboard</h1>
+        <p id="dashboard-user"></p>
+      </section>
+
+      <section class="dashboard-section" aria-labelledby="submission-title">
+        <div class="dashboard-section-head">
+          <h2 id="submission-title">Submissions</h2>
+          <a class="button button-small" href="/#submit">Submit demo</a>
+        </div>
+        <div class="filter-row" id="demo-filter">
+          <button class="button" type="button" data-filter="all">All</button>
+          <button class="button button-outline" type="button" data-filter="pending">Pending</button>
+          <button class="button button-outline" type="button" data-filter="approved">Approved</button>
+          <button class="button button-outline" type="button" data-filter="rejected">Rejected</button>
+        </div>
+        <div class="demo-list" id="demo-list"></div>
+      </section>
+
+      <section class="dashboard-section" id="staff-panel" aria-labelledby="team-title" hidden>
+        <div class="dashboard-section-head">
+          <h2 id="team-title">Team</h2>
+          <p class="demo-meta">Review access and role assignments</p>
+        </div>
+        <div class="staff-list" id="staff-list"></div>
+      </section>
+    </main>
+
+    <script src="config.js"></script>
+    <script src="dashboard.js"></script>
+  </body>
+</html>
