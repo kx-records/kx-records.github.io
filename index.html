@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#09090b">
     <meta name="description" content="KX Records is an independent record label. Explore releases and submit your demo.">
     <title>KX Records — Independent Record Label</title>
+    <link rel="stylesheet" href="portal.css">
     <style>
       :root {
         color-scheme: dark;
@@ -335,7 +336,7 @@
           <a href="#releases">Releases</a>
           <a href="#submit">Submit</a>
         </div>
-        <a class="button" href="#submit">Submit demo <span aria-hidden="true">↗</span></a>
+        <button class="button account-button" id="account-button" type="button">Account</button>
       </nav>
     </header>
 
@@ -390,7 +391,7 @@
                 <input id="artist" name="artistName" autocomplete="name" maxlength="100" placeholder="Your artist name" required>
               </div>
               <div class="field">
-                <label for="email">Email</label>
+                <label for="email">Contact email</label>
                 <input id="email" name="email" type="email" autocomplete="email" maxlength="254" placeholder="you@example.com" required>
               </div>
               <div class="field">
@@ -453,6 +454,54 @@
       <p class="watermark">Made by Cyntron Records team <span aria-hidden="true">·</span> © 2026</p>
     </footer>
 
+    <div class="modal-backdrop" id="auth-backdrop" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+      <div class="auth-modal">
+        <div class="modal-head">
+          <h2 id="auth-title">KX account</h2>
+          <button class="icon-button" id="close-auth" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="auth-tabs" role="tablist" aria-label="Account action">
+          <button class="auth-tab is-active" type="button" role="tab" data-tab="login">Sign in</button>
+          <button class="auth-tab" type="button" role="tab" data-tab="register">Create account</button>
+        </div>
+        <form class="auth-form" id="login-form" data-endpoint="/api/login">
+          <div class="field"><label for="login-email">Email</label><input id="login-email" name="email" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="login-password">Password</label><input id="login-password" name="password" type="password" autocomplete="current-password" minlength="10" required></div>
+          <p class="auth-status" role="status"></p>
+          <button class="button" type="submit">Sign in</button>
+        </form>
+        <form class="auth-form" id="register-form" data-endpoint="/api/register" hidden>
+          <div class="field"><label for="register-name">Name</label><input id="register-name" name="name" autocomplete="name" minlength="2" maxlength="80" required></div>
+          <div class="field"><label for="register-email">Email</label><input id="register-email" name="email" type="email" autocomplete="email" required></div>
+          <div class="field"><label for="register-password">Password</label><input id="register-password" name="password" type="password" autocomplete="new-password" minlength="10" required></div>
+          <p class="auth-status" role="status"></p>
+          <button class="button" type="submit">Create artist account</button>
+        </form>
+      </div>
+    </div>
+
+    <aside class="portal-drawer" id="portal-drawer" aria-label="Account dashboard">
+      <div class="portal-top">
+        <div class="portal-identity"><strong class="portal-name" id="portal-name"></strong><span class="role-badge" id="portal-role"></span></div>
+        <div class="portal-actions"><button class="button button-outline button-small" id="logout-button" type="button">Sign out</button><button class="icon-button" id="close-portal" type="button" aria-label="Close dashboard">×</button></div>
+      </div>
+      <section class="portal-section" id="submit-panel">
+        <h3>Submit demo</h3>
+        <p class="demo-meta">Use the transmission portal below. Your account is attached automatically.</p>
+        <button class="button" type="button" onclick="document.querySelector('#submit').scrollIntoView({behavior:'smooth'});document.querySelector('#portal-drawer').classList.remove('is-open');">Open submission form</button>
+      </section>
+      <section class="portal-section">
+        <h3>Submissions</h3>
+        <div class="filter-row" id="demo-filter"><button class="button" type="button" data-filter="all">All</button><button class="button button-outline" type="button" data-filter="pending">Pending</button><button class="button button-outline" type="button" data-filter="approved">Approved</button><button class="button button-outline" type="button" data-filter="rejected">Rejected</button></div>
+        <div class="demo-list" id="demo-list"></div>
+      </section>
+      <section class="portal-section" id="staff-panel" hidden>
+        <h3>Team</h3>
+        <div class="staff-list" id="staff-list"></div>
+      </section>
+    </aside>
+
+    <script src="portal.js"></script>
     <script>
       (() => {
         const form = document.querySelector("#demo-form");
@@ -547,60 +596,26 @@
           submitButton.textContent = "Transmitting…";
           showStatus("Sending your demo…", "");
           try {
-            const configuredWebhook = window.KX_DISCORD_WEBHOOK_URL;
-            let webhookUrl;
-            try {
-              webhookUrl = new URL(configuredWebhook);
-              if (
-                webhookUrl.protocol !== "https:" ||
-                !["discord.com", "discordapp.com"].includes(webhookUrl.hostname) ||
-                !webhookUrl.pathname.startsWith("/api/webhooks/")
-              ) {
-                throw new Error();
-              }
-              webhookUrl.searchParams.set("wait", "true");
-            } catch {
-              throw new Error("Demo submissions aren't configured yet. Add a Discord webhook URL to config.js.");
-            }
+            const apiBase = (window.KX_API_BASE_URL || "").replace(/\/$/, "");
+            const sessionResponse = await fetch(`${apiBase}/api/me`, { credentials: "include", headers: { Accept: "application/json" } });
+            const session = await sessionResponse.json();
+            if (!session.user) throw new Error("SIGN_IN_REQUIRED");
 
-            const payload = {
-              allowed_mentions: { parse: [] },
-              embeds: [{
-                title: "New demo submission",
-                color: 10512639,
-                fields: [
-                  { name: "Artist", value: form.elements.artistName.value.trim(), inline: true },
-                  { name: "Track", value: form.elements.trackTitle.value.trim(), inline: true },
-                  { name: "Genre", value: form.elements.genre.value.trim(), inline: true },
-                  { name: "Email", value: form.elements.email.value.trim(), inline: true },
-                  { name: "Demo", value: link || `Attached: ${file.name.slice(0, 240)}`, inline: false },
-                  ...(form.elements.message.value.trim()
-                    ? [{ name: "Message", value: form.elements.message.value.trim(), inline: false }]
-                    : [])
-                ],
-                timestamp: new Date().toISOString()
-              }]
-            };
-            const webhookForm = new FormData();
-            webhookForm.set("payload_json", JSON.stringify(payload));
-            if (file) {
-              const safeName = file.name.replace(/[^\w.\- ()]/g, "_").slice(0, 120) || "demo";
-              webhookForm.set("files[0]", file, safeName);
-            }
-
-            const response = await fetch(webhookUrl, {
-              method: "POST",
-              body: webhookForm
-            });
-            const result = await response.json().catch(() => null);
-            if (!response.ok) {
-              throw new Error(result?.message || "Your demo could not be sent. Please try again later.");
-            }
+            const response = await fetch(`${apiBase}/api/demos`, { method: "POST", credentials: "include", body: new FormData(form) });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error || "Your demo could not be sent. Please try again later.");
             form.reset();
             updateFile(null);
             showStatus("Demo received — thanks for sending us your sound.", "success");
+            window.dispatchEvent(new Event("kx:demos-updated"));
           } catch (error) {
-            showStatus(error.message || "Your demo could not be sent. Please try again later.", "error");
+            if (error.message === "SIGN_IN_REQUIRED") {
+              showStatus("Create or sign in to an account before submitting a demo.", "error");
+              document.querySelector("#auth-backdrop").classList.add("is-open");
+              document.body.classList.add("portal-open");
+            } else {
+              showStatus(error.message || "Your demo could not be sent. Please try again later.", "error");
+            }
           } finally {
             submitButton.disabled = false;
             submitButton.innerHTML = 'Transmit demo <span aria-hidden="true">↗</span>';

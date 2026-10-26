@@ -1,1 +1,2 @@
-window.KX_DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1557867295345217626/jbMOgXHU8YJHHQtVt81m9pmtLUMicDnyHNFjv24FftYYh8Gmtuem0CPrLBdjUbyi-sEW";
+// Set this to the HTTPS URL of the Node.js API before publishing to GitHub Pages.
+window.KX_API_BASE_URL = "https://api.example.com";
