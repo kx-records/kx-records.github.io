@@ -6,9 +6,9 @@ This tutorial hosts two parts separately:
 
 - **GitHub Pages:** the public website and browser interface.
 - **Dedicated dashboard:** authenticated users are redirected to `/dashboard.html`, keeping account controls separate from the public site.
-- **Northflank Sandbox:** the private Node.js API, account database, sessions, and uploaded demos.
+- **Paid Node host:** the private Node.js API, account database, sessions, and uploaded demos.
 
-Northflank’s Sandbox plan advertises no card and up to $20/month of usage. It includes persistent volumes, always-on services, automatic HTTPS, and the resources needed for this project. Free resources can change, and usage beyond the included allowance may require an account upgrade. Check Northflank’s current plan limits before production use.
+There is no reliably free provider that currently offers all of these requirements without a card or trade-off: always-on Node.js, HTTPS, persistent account/demo storage, and private uploads. Northflank no longer allows this deployment through its previous no-card Sandbox route. Render's free tier still accepts account creation without a card, but its filesystem is erased whenever the service restarts or spins down after inactivity. The database and upload files in this app would therefore disappear. Use a paid host for durable data.
 
 ## Account roles
 
@@ -25,11 +25,11 @@ Role permissions are enforced by the Node server. The dashboard only hides contr
 You need:
 
 1. A GitHub account and this repository.
-2. A Northflank account. The Sandbox is the no-card option.
-3. A custom API domain such as `api.example.com`, or a Northflank-generated HTTPS hostname.
+2. A durable paid Node host with persistent disk, HTTPS, secrets, and Docker deployment.
+3. A custom API domain such as `api.example.com`, or the host-generated HTTPS hostname.
 4. Access to the domain's DNS settings if using a custom domain.
 
-A custom domain is recommended. GitHub Pages hosts a user or organization repository at `https://username.github.io` and a project repository at `https://username.github.io/repository-name/`. The API domain receives HTTPS traffic directly from Northflank.
+A custom domain is recommended. GitHub Pages hosts a user or organization repository at `https://username.github.io` and a project repository at `https://username.github.io/repository-name/`. The API domain receives HTTPS directly from the Node host.
 
 ## Part 1: run locally
 
@@ -72,23 +72,22 @@ Local and hosted modes behave differently:
 - Hosted mode serves the frontend from GitHub Pages and calls the API from `api.example.com`.
 - Cross-origin hosted sessions require HTTPS and `SameSite=None` cookies.
 
-## Part 2: create the free Northflank service
+## Part 2: choose the API host
 
-1. Open [Northflank](https://northflank.com/) and select **Start free**.
-2. Create an account. The Sandbox does not require a card.
-3. Open **Create project** and name it `kx-records`.
-4. Link GitHub when prompted.
-5. Inside the project, select **Create → Service → Combined**.
-6. Select this repository and the branch that contains the deployment files.
-7. Choose **Dockerfile** as the build option.
-8. Use `Dockerfile` as the Dockerfile path and `/` as the build context.
-9. Open **Advanced** and add a persistent volume named `kx-data` with mount path `/app/data`.
-10. Allocate a small resource plan that remains within the included Sandbox allowance.
-11. Create the service.
+Use one of these paths:
 
-Northflank builds the Docker image and deploys it automatically. The Dockerfile exposes port 3000 and runs `server.js`.
+| Host choice | Account card? | Persistent data? | Best use |
+|---|---|---|---|
+| Local PC or VPS | No provider card for local PC | Yes | Development or a server you control |
+| Render free web service | Often no card to start | No, filesystem resets | Temporary UI testing only |
+| Northflank paid service | Yes | Yes, with a volume | Managed container deployment |
+| Other VPS/PaaS | Depends on provider | Yes, if configured | Durable production deployment |
 
-## Part 3: configure Northflank secrets
+Do not use Render free storage for accounts or demos. It is only suitable for testing this code because uploaded files and `portal.json` are lost on restart or redeploy. For the reliable setup, choose a VPS or PaaS that offers a persistent volume and attach it to `/app/data`.
+
+Northflank can no longer provide the old no-card free route described earlier. If you chose a paid container host, create a Dockerfile service from this repository and use the generated HTTPS URL.
+
+## Part 3: configure host secrets
 
 1. Open the new service and choose **Configure → Variables and secrets**.
 2. Add runtime variables for the API:
@@ -97,7 +96,7 @@ Northflank builds the Docker image and deploys it automatically. The Dockerfile 
 PORT=3000
 NODE_ENV=production
 KX_FRONTEND_ORIGIN=https://YOUR_USER.github.io
-KX_API_BASE_URL=https://YOUR_NORTHFLANK_HOSTNAME
+KX_API_BASE_URL=https://YOUR_NODE_HOSTNAME
 KX_SESSION_SECRET=paste-the-output-from-node-crypto
 KX_OWNER_EMAIL=owner@example.com
 KX_OWNER_PASSWORD=use-a-different-long-password
@@ -118,33 +117,34 @@ Set `KX_FRONTEND_ORIGIN` to the exact GitHub Pages origin:
 
 Do not include a trailing slash. Do not include `/api` or the repository path in `KX_FRONTEND_ORIGIN`.
 
-Local `npm start` loads `.env` automatically. Northflank stores these values in its variables and secrets interface rather than in Git or a local `.env` file.
+Local `npm start` loads `.env` automatically. The hosted platform stores these values in its variables or secrets interface rather than in Git or a local `.env` file.
 
 ## Part 4: publish the API
 
-1. Open **Configure → Networking**.
-2. Add a public HTTP port using container port `3000`.
+1. Configure the service to listen on container port `3000`.
+2. Expose that port using the host's public HTTP/HTTPS networking settings.
 3. Copy the generated HTTPS hostname.
-4. Reopen **Variables and secrets** and set `KX_API_BASE_URL` to that HTTPS hostname.
-5. Deploy or restart the service.
-6. Open `https://YOUR_NORTHFLANK_HOSTNAME/api/me`.
+4. Set `KX_API_BASE_URL` to that HTTPS hostname.
+5. Attach persistent storage to `/app/data`.
+6. Deploy or restart the service.
+7. Open `https://YOUR_NODE_HOSTNAME/api/me`.
 
-The response should be JSON containing `{"user":null}` before login. Northflank terminates TLS and handles certificate renewal automatically.
+The response should be JSON containing `{"user":null}` before login. The host terminates TLS and manages certificate renewal.
 
 To use `api.example.com` instead:
 
-1. Open **Networking → Custom domain**.
+1. Open the host's custom-domain settings.
 2. Add `api.example.com`.
-3. Create the DNS record Northflank requests.
+3. Create the DNS record the host requests.
 4. Set `KX_API_BASE_URL=https://api.example.com`.
 5. Restart or redeploy the service.
 
 ## Part 5: verify persistent storage and deployment
 
 1. Submit a test demo.
-2. Restart the Northflank service.
+2. Restart the Node service.
 3. Sign in and verify the test account and demo remain present.
-4. If they disappear, confirm the volume is mounted at `/app/data` and is attached to the service.
+4. If they disappear, confirm durable storage is mounted at `/app/data` and attached to the service.
 5. Inspect logs from the service dashboard.
 
 GitHub pushes to the connected branch rebuild and redeploy automatically when CI/CD is enabled.
@@ -167,7 +167,7 @@ If GitHub Pages uses a project URL, test both possibilities before continuing:
 
 Set `KX_FRONTEND_ORIGIN` to the exact GitHub Pages origin. For a project repository, include the full origin and repository path only in the browser URL, not in the origin setting; origins consist of scheme and host, not the repository path.
 
-After changing a deployment environment variable, use Northflank's **Deploy / Restart** control.
+After changing a deployment environment variable, use the host's **Deploy / Restart** control.
 
 ## Part 7: test the complete flow
 
@@ -198,22 +198,22 @@ The response should contain a user after sign-in. A `403` response usually means
 
 The server stores account data in `data/portal.json` and uploaded audio in `data/uploads/`.
 
-Use the Northflank web shell or persistent-volume tooling to export `portal.json` and `uploads/` into encrypted storage outside Northflank. Schedule off-platform backups and test restoring them before relying on the data.
+Use the host's web shell or persistent-volume tooling to export `portal.json` and `uploads/` into encrypted storage outside the host. Schedule off-platform backups and test restoring them before relying on the data.
 
 Never expose `/data`, `portal.json`, or uploaded demos through a public port or GitHub Pages.
 
-The Northflank persistent volume must remain attached to the service. Deleting or replacing the volume can delete every account and demo. Export backups regularly and test restoring them outside the live service.
+The persistent volume must remain attached to the service. Deleting or replacing the volume can delete every account and demo. Export backups regularly and test restoring them outside the live service.
 
 ## Security checks
 
 - Keep `.env`, private API keys, and private SSH keys out of Git.
 - Remove or regenerate the old Discord webhook from [config.js](config.js); it is no longer used and was exposed in the previous public configuration.
 - Use unique, long owner and developer passwords.
-- Keep Northflank runtime resources and repository dependencies updated.
-- Expose container port `3000` through Northflank; do not add a second public Node server.
+- Keep the host runtime and repository dependencies updated.
+- Expose container port `3000` through the host; do not add a second public Node server.
 - Restrict the API CORS origin to one exact GitHub Pages origin.
 - Keep demo file storage outside the static frontend.
-- Review Northflank variables, volume access, custom domains, and deployment logs periodically.
+- Review host variables, volume access, custom domains, and deployment logs periodically.
 - Schedule regular backups and test a restore before relying on the site.
 
 ## Session behavior
@@ -235,9 +235,9 @@ The file-backed store is suitable for this single-instance deployment. For a loa
 Confirm:
 
 - `KX_FRONTEND_ORIGIN` exactly matches `https://username.github.io`.
-- [config.js](config.js) uses the exact Northflank API origin and HTTPS URL.
+- [config.js](config.js) uses the exact Node-host API origin and HTTPS URL.
 - `NODE_ENV=production` is set.
-- Northflank exposes container port `3000` publicly.
+- The host exposes container port `3000` publicly.
 
 ### Login succeeds but refresh logs out
 
@@ -246,15 +246,15 @@ Confirm:
 - Requests include `credentials: "include"`.
 - The API origin is HTTPS.
 - The frontend and API origins do not accidentally differ in `http`/`https` or `www` usage.
-- The server was not restarted. The current session store is in memory.
+- Check that `data/sessions.json` is inside the persistent `/app/data` volume and has not been deleted.
 
 ### The custom API domain has no HTTPS certificate
 
-Confirm the DNS record matches Northflank's custom-domain instructions, wait for DNS propagation, and open the domain again from the Northflank Networking page.
+Confirm the DNS record matches the host's custom-domain instructions, wait for DNS propagation, and open the domain again from the host networking page.
 
 ### Uploaded demos cannot be downloaded
 
-Confirm the persistent volume is mounted at `/app/data`, inspect the Northflank service logs, and redeploy after fixing the mount or service resource.
+Confirm durable storage is mounted at `/app/data`, inspect the host service logs, and redeploy after fixing the mount or service resource.
 
 ### GitHub Pages shows an old frontend
 
