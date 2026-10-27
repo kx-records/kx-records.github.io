@@ -218,6 +218,31 @@ function publicDemo(demo) {
   };
 }
 
+// Posts a short notice to Discord when a demo arrives. The webhook URL lives only in the server's
+// environment (DISCORD_WEBHOOK_URL), never in the website files. Contact details are not included.
+function notifyDiscord(demo) {
+  const webhookUrl = process.env.DISCORD_WEBHOOK_URL;
+  if (!webhookUrl) return;
+  const clip = (value, max = 900) => String(value || "—").slice(0, max);
+  fetch(webhookUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      allowed_mentions: { parse: [] },
+      embeds: [{
+        title: "New demo submission",
+        fields: [
+          { name: "Artist", value: clip(demo.artistName, 200) },
+          { name: "Track", value: clip(demo.trackTitle, 200) },
+          { name: "Genre", value: clip(demo.genre, 100) },
+          { name: demo.link ? "Link" : "File", value: clip(demo.link || demo.fileName) },
+          { name: "Message", value: clip(demo.message) }
+        ]
+      }]
+    })
+  }).catch(() => {});
+}
+
 app.get("/api/me", (request, response) => {
   const user = db.users.find((item) => item.id === request.session.userId);
   response.json({ user: user ? publicUser(user) : null });
@@ -289,6 +314,7 @@ app.post("/api/demos", requireAuth, upload.single("demoFile"), (request, respons
   };
   db.demos.push(demo);
   saveDb();
+  notifyDiscord(demo);
   response.status(201).json({ demo: publicDemo(demo) });
 });
 
