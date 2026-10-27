@@ -1,144 +1,115 @@
 const crypto = require("crypto");
-const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const session = require("express-session");
+const pgSession = require("connect-pg-simple")(session);
 const helmet = require("helmet");
 const bcrypt = require("bcryptjs");
 const multer = require("multer");
-const cookieSignature = require("cookie-signature");
+const { Pool } = require("pg");
+
+if (!process.env.DATABASE_URL) {
+  console.error("DATABASE_URL is not set. Add your Neon connection string to the environment.");
+  process.exit(1);
+}
+if (!process.env.KX_SESSION_SECRET) {
+  console.warn("KX_SESSION_SECRET is not set. A temporary secret is being used, so logins reset on every restart.");
+}
 
 const app = express();
 app.set("trust proxy", 1);
 const root = __dirname;
-const dataDir = path.join(root, "data");
-const dbFile = path.join(dataDir, "portal.json");
-const uploadDir = path.join(dataDir, "uploads");
-const sessionFile = path.join(dataDir, "sessions.json");
-fs.mkdirSync(uploadDir, { recursive: true });
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 15000
+});
+// Neon pauses idle databases; a dropped idle connection must not crash the server.
+pool.on("error", (error) => console.error("Idle database connection error:", error.message));
 
 const cleanRole = (role) => ["artist", "ar", "manager", "owner", "developer"].includes(role) ? role : "artist";
 const hasOwnerPower = (role) => ["owner", "developer"].includes(role);
 const staffRoles = ["ar", "manager", "owner", "developer"];
-let db = loadDb();
+const isUuid = (value) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value));
+// Compared against when an email doesn't exist, so login timing doesn't reveal which emails have accounts.
+const DUMMY_HASH = bcrypt.hashSync("kx-dummy-password", 12);
 
-function loadDb() {
-  if (!fs.existsSync(dbFile)) return { users: [], demos: [] };
-  try {
-    return JSON.parse(fs.readFileSync(dbFile, "utf8"));
-  } catch (error) {
-    throw new Error(`Could not read ${dbFile}: ${error.message}`);
-  }
-}
-
-function saveDb() {
-  fs.writeFileSync(dbFile, JSON.stringify(db, null, 2));
-}
-
-class FileSessionStore extends session.Store {
-  constructor(file) {
-    super();
-    this.file = file;
-    this.sessions = this.read();
-  }
-
-  read() {
-    if (!fs.existsSync(this.file)) return {};
-    try {
-      const sessions = JSON.parse(fs.readFileSync(this.file, "utf8"));
-      const now = Date.now();
-      return Object.fromEntries(Object.entries(sessions).filter(([, value]) => !value.expires || value.expires > now));
-    } catch {
-      return {};
-    }
-  }
-
-  write() {
-    const temporaryFile = `${this.file}.${process.pid}.tmp`;
-    fs.writeFileSync(temporaryFile, JSON.stringify(this.sessions));
-    fs.renameSync(temporaryFile, this.file);
-  }
-
-  get(sid, callback) {
-    const session = this.sessions[sid];
-    if (!session || (session.expires && session.expires <= Date.now())) {
-      delete this.sessions[sid];
-      callback(null, null);
-      return;
-    }
-    callback(null, JSON.parse(JSON.stringify(session.data)));
-  }
-
-  set(sid, session, callback) {
-    const expires = session.cookie.expires ? new Date(session.cookie.expires).getTime() : Date.now() + 30 * 24 * 60 * 60 * 1000;
-    this.sessions[sid] = { data: session, expires };
-    try { this.write(); callback(null); } catch (error) { callback(error); }
-  }
-
-  destroy(sid, callback) {
-    delete this.sessions[sid];
-    try { this.write(); callback(null); } catch (error) { callback(error); }
-  }
-
-  touch(sid, session, callback) {
-    if (this.sessions[sid]) {
-      this.sessions[sid].expires = session.cookie.expires ? new Date(session.cookie.expires).getTime() : Date.now() + 30 * 24 * 60 * 60 * 1000;
-      try { this.write(); } catch (error) { return callback(error); }
-    }
-    callback(null);
-  }
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id uuid PRIMARY KEY,
+      name text NOT NULL,
+      email text NOT NULL UNIQUE,
+      password_hash text NOT NULL,
+      role text NOT NULL DEFAULT 'artist',
+      seeded boolean NOT NULL DEFAULT false,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS demos (
+      id uuid PRIMARY KEY,
+      user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      artist_name text NOT NULL,
+      track_title text NOT NULL,
+      genre text NOT NULL,
+      message text NOT NULL DEFAULT '',
+      link text NOT NULL DEFAULT '',
+      file_name text NOT NULL DEFAULT '',
+      file_data bytea,
+      status text NOT NULL DEFAULT 'pending',
+      reviewer_name text NOT NULL DEFAULT '',
+      submitted_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS demos_user_idx ON demos (user_id);
+    CREATE INDEX IF NOT EXISTS demos_submitted_idx ON demos (submitted_at DESC);
+  `);
 }
 
 async function ensurePrivilegedAccount(emailValue, passwordValue, role, name) {
   if (!emailValue || !passwordValue) return;
   const email = emailValue.trim().toLowerCase();
-  let user = db.users.find((item) => item.email === email);
   const passwordHash = await bcrypt.hash(passwordValue, 12);
-  if (!user) {
-    user = { id: crypto.randomUUID(), name, email, passwordHash, role, seeded: true, createdAt: new Date().toISOString() };
-    db.users.push(user);
-  } else {
-    user.role = role;
-    user.name = name;
-    user.seeded = true;
-    user.passwordHash = passwordHash;
-  }
+  await pool.query(
+    `INSERT INTO users (id, name, email, password_hash, role, seeded)
+     VALUES ($1, $2, $3, $4, $5, true)
+     ON CONFLICT (email) DO UPDATE
+       SET name = EXCLUDED.name, role = EXCLUDED.role, seeded = true, password_hash = EXCLUDED.password_hash`,
+    [crypto.randomUUID(), name, email, passwordHash, role]
+  );
 }
 
 // If an owner/developer email is changed in the environment, the old seeded account would otherwise
 // stay behind with full power. Remove it, or demote it to artist if it already has demos.
-function removeStaleSeededAccounts() {
+async function removeStaleSeededAccounts() {
   const configured = [process.env.KX_OWNER_EMAIL, process.env.KX_DEVELOPER_EMAIL]
     .map((value) => (value || "").trim().toLowerCase())
     .filter(Boolean);
   if (!configured.length) return;
-  const stale = db.users.filter((user) => user.seeded && !configured.includes(user.email));
-  for (const user of stale) {
-    if (db.demos.some((demo) => demo.userId === user.id)) {
-      user.role = "artist";
-      user.seeded = false;
-    } else {
-      db.users = db.users.filter((item) => item !== user);
-    }
-  }
+  await pool.query(
+    `UPDATE users SET role = 'artist', seeded = false
+     WHERE seeded AND NOT (email = ANY($1)) AND id IN (SELECT user_id FROM demos)`,
+    [configured]
+  );
+  await pool.query(`DELETE FROM users WHERE seeded AND NOT (email = ANY($1))`, [configured]);
 }
 
 async function ensurePrivilegedAccounts() {
   await ensurePrivilegedAccount(process.env.KX_OWNER_EMAIL, process.env.KX_OWNER_PASSWORD, "owner", process.env.KX_OWNER_NAME || "Label Owner");
   await ensurePrivilegedAccount(process.env.KX_DEVELOPER_EMAIL, process.env.KX_DEVELOPER_PASSWORD, "developer", process.env.KX_DEVELOPER_NAME || "Developer");
-  removeStaleSeededAccounts();
-  saveDb();
+  await removeStaleSeededAccounts();
 }
 
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: uploadDir,
-    filename: (_request, file, callback) => callback(null, `${crypto.randomUUID()}-${path.extname(file.originalname).toLowerCase()}`)
-  }),
+  storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_request, file, callback) => {
     if (!/\.(mp3|wav|m4a)$/i.test(file.originalname) || !/^audio\//.test(file.mimetype)) {
-      return callback(new Error("Please upload an MP3, WAV, or M4A audio file."));
+      const error = new Error("Please upload an MP3, WAV, or M4A audio file.");
+      error.status = 400;
+      error.expose = true;
+      return callback(error);
     }
     callback(null, true);
   }
@@ -175,29 +146,36 @@ const sessionCookieOptions = {
   httpOnly: true,
   sameSite: frontendOrigin ? "none" : "lax",
   secure: "auto",
-  path: "/"
+  path: "/",
+  maxAge: 14 * 24 * 60 * 60 * 1000
 };
 app.use(session({
   secret: process.env.KX_SESSION_SECRET || crypto.randomBytes(32).toString("hex"),
-  store: new FileSessionStore(sessionFile),
+  store: new pgSession({ pool, createTableIfMissing: true }),
   resave: false,
   saveUninitialized: false,
   rolling: true,
   cookie: sessionCookieOptions
 }));
 
-function sendSessionResponse(request, response, user, status = 200) {
-  request.session.save((error) => {
-    if (error) return response.status(500).json({ error: "Session could not be created." });
-    const signedSessionId = `s:${cookieSignature.sign(request.sessionID, process.env.KX_SESSION_SECRET)}`;
-    response.cookie("connect.sid", signedSessionId, sessionCookieOptions);
-    response.status(status).json({ user: publicUser(user) });
+// New session id on every login/signup, so an id planted before login can't be reused afterwards.
+const signIn = (request, userId) => new Promise((resolve, reject) => {
+  request.session.regenerate((error) => {
+    if (error) return reject(error);
+    request.session.userId = userId;
+    resolve();
   });
+});
+
+async function findUser(id) {
+  if (!isUuid(id)) return null;
+  const { rows } = await pool.query("SELECT * FROM users WHERE id = $1", [id]);
+  return rows[0] || null;
 }
 
-function requireAuth(request, response, next) {
+async function requireAuth(request, response, next) {
   if (!request.session.userId) return response.status(401).json({ error: "Sign in to continue." });
-  const user = db.users.find((item) => item.id === request.session.userId);
+  const user = await findUser(request.session.userId);
   if (!user) {
     request.session.destroy(() => {});
     return response.status(401).json({ error: "Session is no longer valid." });
@@ -206,8 +184,8 @@ function requireAuth(request, response, next) {
   next();
 }
 
-function requirePageAuth(request, response, next) {
-  const user = db.users.find((item) => item.id === request.session.userId);
+async function requirePageAuth(request, response, next) {
+  const user = await findUser(request.session.userId);
   if (!user) return response.redirect(302, "/#account");
   request.user = user;
   next();
@@ -219,24 +197,35 @@ function requireStaff(request, response, next) {
 }
 
 function publicUser(user) {
-  return { id: user.id, name: user.name, email: user.email, role: user.role, createdAt: user.createdAt };
+  return { id: user.id, name: user.name, email: user.email, role: user.role, createdAt: new Date(user.created_at).toISOString() };
 }
+
+const demoColumns = `d.id, d.user_id, d.artist_name, d.track_title, d.genre, d.message, d.link, d.file_name,
+  d.status, d.reviewer_name, d.submitted_at, d.updated_at, u.name AS user_name`;
 
 function publicDemo(demo) {
   return {
     id: demo.id,
-    artistName: demo.artistName,
-    trackTitle: demo.trackTitle,
+    artistName: demo.artist_name,
+    trackTitle: demo.track_title,
     genre: demo.genre,
     message: demo.message,
     link: demo.link,
-    fileName: demo.fileName,
+    fileName: demo.file_name,
     status: demo.status,
-    reviewerName: demo.reviewerName,
-    submittedAt: demo.submittedAt,
-    updatedAt: demo.updatedAt,
-    user: db.users.find((user) => user.id === demo.userId)?.name
+    reviewerName: demo.reviewer_name,
+    submittedAt: new Date(demo.submitted_at).toISOString(),
+    updatedAt: new Date(demo.updated_at).toISOString(),
+    user: demo.user_name
   };
+}
+
+async function findDemo(id) {
+  const { rows } = await pool.query(
+    `SELECT ${demoColumns} FROM demos d JOIN users u ON u.id = d.user_id WHERE d.id = $1`,
+    [id]
+  );
+  return rows[0] || null;
 }
 
 // Posts a short notice to Discord when a demo arrives. The webhook URL lives only in the server's
@@ -264,35 +253,45 @@ function notifyDiscord(demo) {
   }).catch(() => {});
 }
 
-app.get("/api/me", (request, response) => {
-  const user = db.users.find((item) => item.id === request.session.userId);
+app.get("/api/me", async (request, response) => {
+  const user = await findUser(request.session.userId);
   response.json({ user: user ? publicUser(user) : null });
 });
 
 app.post("/api/register", async (request, response) => {
-  const name = String(request.body.name || "").trim();
-  const email = String(request.body.email || "").trim().toLowerCase();
-  const password = String(request.body.password || "");
+  const body = request.body || {};
+  const name = String(body.name || "").trim();
+  const email = String(body.email || "").trim().toLowerCase();
+  const password = String(body.password || "");
   if (name.length < 2 || name.length > 80) return response.status(400).json({ error: "Enter a name between 2 and 80 characters." });
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid email address." });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return response.status(400).json({ error: "Enter a valid email address." });
   if (password.length < 10) return response.status(400).json({ error: "Password must be at least 10 characters." });
-  if (db.users.some((user) => user.email === email)) return response.status(409).json({ error: "That email already has an account." });
   const passwordHash = await bcrypt.hash(password, 12);
-  // Check again after the slow hash: a double-click sends two requests, and both would pass the first check.
-  if (db.users.some((user) => user.email === email)) return response.status(409).json({ error: "That email already has an account." });
-  const user = { id: crypto.randomUUID(), name, email, passwordHash, role: "artist", createdAt: new Date().toISOString() };
-  db.users.push(user);
-  saveDb();
-  request.session.userId = user.id;
+  let user;
+  try {
+    // The UNIQUE constraint on email makes duplicates impossible, even if the form is submitted twice at once.
+    const { rows } = await pool.query(
+      `INSERT INTO users (id, name, email, password_hash, role) VALUES ($1, $2, $3, $4, 'artist') RETURNING *`,
+      [crypto.randomUUID(), name, email, passwordHash]
+    );
+    user = rows[0];
+  } catch (error) {
+    if (error.code === "23505") return response.status(409).json({ error: "That email already has an account." });
+    throw error;
+  }
+  await signIn(request, user.id);
   response.status(201).json({ user: publicUser(user) });
 });
 
 app.post("/api/login", async (request, response) => {
-  const email = String(request.body.email || "").trim().toLowerCase();
-  const password = String(request.body.password || "");
-  const user = db.users.find((item) => item.email === email);
-  if (!user || !(await bcrypt.compare(password, user.passwordHash))) return response.status(401).json({ error: "Email or password is incorrect." });
-  request.session.userId = user.id;
+  const body = request.body || {};
+  const email = String(body.email || "").trim().toLowerCase();
+  const password = String(body.password || "");
+  const { rows } = await pool.query("SELECT * FROM users WHERE email = $1", [email]);
+  const user = rows[0];
+  const passwordMatches = await bcrypt.compare(password, user ? user.password_hash : DUMMY_HASH);
+  if (!user || !passwordMatches) return response.status(401).json({ error: "Email or password is incorrect." });
+  await signIn(request, user.id);
   response.json({ user: publicUser(user) });
 });
 
@@ -300,28 +299,29 @@ app.post("/api/logout", requireAuth, (request, response) => {
   request.session.destroy(() => response.json({ ok: true }));
 });
 
-app.get("/api/demos", requireAuth, (request, response) => {
-  const visible = staffRoles.includes(request.user.role)
-    ? db.demos
-    : db.demos.filter((demo) => demo.userId === request.user.id);
-  response.json({ demos: visible.map(publicDemo).sort((a, b) => b.submittedAt.localeCompare(a.submittedAt)) });
+app.get("/api/demos", requireAuth, async (request, response) => {
+  const staff = staffRoles.includes(request.user.role);
+  const { rows } = await pool.query(
+    `SELECT ${demoColumns} FROM demos d JOIN users u ON u.id = d.user_id
+     ${staff ? "" : "WHERE d.user_id = $1"}
+     ORDER BY d.submitted_at DESC LIMIT 500`,
+    staff ? [] : [request.user.id]
+  );
+  response.json({ demos: rows.map(publicDemo) });
 });
 
-app.post("/api/demos", requireAuth, upload.single("demoFile"), (request, response) => {
-  const artistName = String(request.body.artistName || "").trim();
-  const trackTitle = String(request.body.trackTitle || "").trim();
-  const genre = String(request.body.genre || "").trim();
-  const message = String(request.body.message || "").trim();
-  const link = String(request.body.demoUrl || "").trim();
+app.post("/api/demos", requireAuth, upload.single("demoFile"), async (request, response) => {
+  const body = request.body || {};
+  const artistName = String(body.artistName || "").trim().slice(0, 120);
+  const trackTitle = String(body.trackTitle || "").trim().slice(0, 160);
+  const genre = String(body.genre || "").trim().slice(0, 80);
+  const message = String(body.message || "").trim().slice(0, 2000);
+  const link = String(body.demoUrl || "").trim().slice(0, 2000);
   if (!artistName || !trackTitle || !genre) {
-    if (request.file) fs.unlinkSync(request.file.path);
     return response.status(400).json({ error: "Artist name, track title, and genre are required." });
   }
   if (!request.file && !link) return response.status(400).json({ error: "Upload a demo or provide a listening link." });
-  if (request.file && link) {
-    fs.unlinkSync(request.file.path);
-    return response.status(400).json({ error: "Submit a file or a link, not both." });
-  }
+  if (request.file && link) return response.status(400).json({ error: "Submit a file or a link, not both." });
   if (link) {
     try {
       const url = new URL(link);
@@ -330,56 +330,56 @@ app.post("/api/demos", requireAuth, upload.single("demoFile"), (request, respons
       return response.status(400).json({ error: "Demo link must use HTTPS." });
     }
   }
-  const now = new Date().toISOString();
-  const demo = {
-    id: crypto.randomUUID(), userId: request.user.id, artistName, trackTitle, genre, message, link,
-    fileName: request.file?.originalname || "", storedFile: request.file?.filename || "",
-    status: "pending", reviewerName: "", submittedAt: now, updatedAt: now
-  };
-  db.demos.push(demo);
-  saveDb();
+  const id = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO demos (id, user_id, artist_name, track_title, genre, message, link, file_name, file_data)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [id, request.user.id, artistName, trackTitle, genre, message, link, request.file?.originalname || "", request.file?.buffer || null]
+  );
+  const demo = publicDemo(await findDemo(id));
   notifyDiscord(demo);
-  response.status(201).json({ demo: publicDemo(demo) });
+  response.status(201).json({ demo });
 });
 
-app.get("/api/demos/:id/file", requireAuth, (request, response) => {
-  const demo = db.demos.find((item) => item.id === request.params.id);
-  if (!demo) return response.sendStatus(404);
-  const canView = staffRoles.includes(request.user.role) || demo.userId === request.user.id;
-  if (!canView || !demo.storedFile) return response.sendStatus(404);
-  const filePath = path.join(uploadDir, demo.storedFile);
-  if (!fs.existsSync(filePath)) return response.sendStatus(404);
-  response.download(filePath, demo.fileName);
+app.get("/api/demos/:id/file", requireAuth, async (request, response) => {
+  if (!isUuid(request.params.id)) return response.sendStatus(404);
+  const { rows } = await pool.query("SELECT user_id, file_name, file_data FROM demos WHERE id = $1", [request.params.id]);
+  const demo = rows[0];
+  if (!demo || !demo.file_data) return response.sendStatus(404);
+  const canView = staffRoles.includes(request.user.role) || demo.user_id === request.user.id;
+  if (!canView) return response.sendStatus(404);
+  response.attachment(demo.file_name);
+  response.send(demo.file_data);
 });
 
-app.patch("/api/demos/:id/review", requireAuth, requireStaff, (request, response) => {
-  const status = String(request.body.status || "");
+app.patch("/api/demos/:id/review", requireAuth, requireStaff, async (request, response) => {
+  const status = String((request.body || {}).status || "");
   if (!["approved", "rejected", "pending"].includes(status)) return response.status(400).json({ error: "Invalid review status." });
-  const demo = db.demos.find((item) => item.id === request.params.id);
-  if (!demo) return response.sendStatus(404);
-  demo.status = status;
-  demo.reviewerName = request.user.name;
-  demo.updatedAt = new Date().toISOString();
-  saveDb();
-  response.json({ demo: publicDemo(demo) });
+  if (!isUuid(request.params.id)) return response.sendStatus(404);
+  const result = await pool.query(
+    "UPDATE demos SET status = $1, reviewer_name = $2, updated_at = now() WHERE id = $3",
+    [status, request.user.name, request.params.id]
+  );
+  if (!result.rowCount) return response.sendStatus(404);
+  response.json({ demo: publicDemo(await findDemo(request.params.id)) });
 });
 
-app.get("/api/users", requireAuth, requireStaff, (_request, response) => {
-  response.json({ users: db.users.map(publicUser).sort((a, b) => a.name.localeCompare(b.name)) });
+app.get("/api/users", requireAuth, requireStaff, async (_request, response) => {
+  const { rows } = await pool.query("SELECT * FROM users ORDER BY lower(name), created_at");
+  response.json({ users: rows.map(publicUser) });
 });
 
-app.patch("/api/users/:id/role", requireAuth, requireStaff, (request, response) => {
-  const targetRole = cleanRole(request.body.role);
-  const target = db.users.find((user) => user.id === request.params.id);
+app.patch("/api/users/:id/role", requireAuth, requireStaff, async (request, response) => {
+  const targetRole = cleanRole((request.body || {}).role);
+  const target = await findUser(request.params.id);
   if (!target) return response.sendStatus(404);
   const allowed = hasOwnerPower(request.user.role)
     ? ["ar", "manager", "developer"].includes(targetRole)
     : request.user.role === "manager" && targetRole === "ar";
   if (!allowed) return response.status(403).json({ error: "You cannot assign that role." });
   if (hasOwnerPower(target.role)) return response.status(403).json({ error: "Owner and developer roles cannot be changed." });
-  target.role = targetRole;
-  saveDb();
-  response.json({ user: publicUser(target) });
+  await pool.query("UPDATE users SET role = $1 WHERE id = $2", [targetRole, target.id]);
+  response.json({ user: publicUser({ ...target, role: targetRole }) });
 });
 
 app.get("/dashboard.html", requirePageAuth, (_request, response) => {
@@ -388,14 +388,35 @@ app.get("/dashboard.html", requirePageAuth, (_request, response) => {
 app.get("/dashboard", requirePageAuth, (_request, response) => {
   response.redirect(302, "/dashboard.html");
 });
-app.use(express.static(root, { index: "index.html" }));
+
+// The static handler below serves the project folder, so keep server code and package files out of it.
+const privatePaths = /^\/(server\.js|test-server\.js|package(-lock)?\.json|dockerfile|readme\.md|node_modules|data|\.git)(\/|$)/i;
+app.use((request, response, next) => {
+  let requested;
+  try { requested = decodeURIComponent(request.path); } catch { return response.sendStatus(400); }
+  const normalized = path.posix.normalize(`/${requested.replace(/\\/g, "/")}`);
+  if (privatePaths.test(normalized)) return response.sendStatus(404);
+  next();
+});
+app.use(express.static(root, { index: "index.html", dotfiles: "ignore" }));
+
 app.use((error, _request, response, _next) => {
-  if (error instanceof multer.MulterError) return response.status(400).json({ error: "Demo must be 25 MB or smaller." });
-  response.status(400).json({ error: error.message || "Request could not be processed." });
+  if (error instanceof multer.MulterError) {
+    return response.status(400).json({ error: error.code === "LIMIT_FILE_SIZE" ? "Demo must be 25 MB or smaller." : "Upload could not be processed." });
+  }
+  if (error.status >= 400 && error.status < 500) {
+    return response.status(error.status).json({ error: error.expose ? error.message : "Request could not be processed." });
+  }
+  console.error(error);
+  response.status(500).json({ error: "Something went wrong on the server. Please try again." });
 });
 
 (async () => {
+  await initDb();
   await ensurePrivilegedAccounts();
   const port = Number(process.env.PORT) || 3000;
   app.listen(port, () => console.log(`KX Records portal listening on http://localhost:${port}`));
-})();
+})().catch((error) => {
+  console.error("Startup failed:", error);
+  process.exit(1);
+});
