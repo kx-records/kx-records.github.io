@@ -95,17 +95,38 @@ async function ensurePrivilegedAccount(emailValue, passwordValue, role, name) {
   let user = db.users.find((item) => item.email === email);
   const passwordHash = await bcrypt.hash(passwordValue, 12);
   if (!user) {
-    user = { id: crypto.randomUUID(), name, email, passwordHash, role, createdAt: new Date().toISOString() };
+    user = { id: crypto.randomUUID(), name, email, passwordHash, role, seeded: true, createdAt: new Date().toISOString() };
     db.users.push(user);
   } else {
     user.role = role;
+    user.name = name;
+    user.seeded = true;
     user.passwordHash = passwordHash;
   }
 }
 
+// If an owner/developer email is changed in the environment, the old seeded account would otherwise
+// stay behind with full power. Remove it, or demote it to artist if it already has demos.
+function removeStaleSeededAccounts() {
+  const configured = [process.env.KX_OWNER_EMAIL, process.env.KX_DEVELOPER_EMAIL]
+    .map((value) => (value || "").trim().toLowerCase())
+    .filter(Boolean);
+  if (!configured.length) return;
+  const stale = db.users.filter((user) => user.seeded && !configured.includes(user.email));
+  for (const user of stale) {
+    if (db.demos.some((demo) => demo.userId === user.id)) {
+      user.role = "artist";
+      user.seeded = false;
+    } else {
+      db.users = db.users.filter((item) => item !== user);
+    }
+  }
+}
+
 async function ensurePrivilegedAccounts() {
-  await ensurePrivilegedAccount(process.env.KX_OWNER_EMAIL, process.env.KX_OWNER_PASSWORD, "owner", "Label Owner");
-  await ensurePrivilegedAccount(process.env.KX_DEVELOPER_EMAIL, process.env.KX_DEVELOPER_PASSWORD, "developer", "Developer");
+  await ensurePrivilegedAccount(process.env.KX_OWNER_EMAIL, process.env.KX_OWNER_PASSWORD, "owner", process.env.KX_OWNER_NAME || "Label Owner");
+  await ensurePrivilegedAccount(process.env.KX_DEVELOPER_EMAIL, process.env.KX_DEVELOPER_PASSWORD, "developer", process.env.KX_DEVELOPER_NAME || "Developer");
+  removeStaleSeededAccounts();
   saveDb();
 }
 
@@ -256,7 +277,10 @@ app.post("/api/register", async (request, response) => {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid email address." });
   if (password.length < 10) return response.status(400).json({ error: "Password must be at least 10 characters." });
   if (db.users.some((user) => user.email === email)) return response.status(409).json({ error: "That email already has an account." });
-  const user = { id: crypto.randomUUID(), name, email, passwordHash: await bcrypt.hash(password, 12), role: "artist", createdAt: new Date().toISOString() };
+  const passwordHash = await bcrypt.hash(password, 12);
+  // Check again after the slow hash: a double-click sends two requests, and both would pass the first check.
+  if (db.users.some((user) => user.email === email)) return response.status(409).json({ error: "That email already has an account." });
+  const user = { id: crypto.randomUUID(), name, email, passwordHash, role: "artist", createdAt: new Date().toISOString() };
   db.users.push(user);
   saveDb();
   request.session.userId = user.id;
